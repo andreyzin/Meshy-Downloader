@@ -145,6 +145,24 @@
     return new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
   }
 
+  function loadButtonPosition() {
+    try {
+      const saved = localStorage.getItem('__meshyDLBtnPos');
+      if (!saved) return null;
+      const pos = JSON.parse(saved);
+      if (typeof pos.left !== 'number' || typeof pos.top !== 'number') return null;
+      return pos;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function saveButtonPosition(pos) {
+    try {
+      localStorage.setItem('__meshyDLBtnPos', JSON.stringify(pos));
+    } catch (e) {}
+  }
+
   // ── Bouton flottant ────────────────────────────────────────────────────────
   function injectBtn() {
     if (document.getElementById('__meshyDLBtn')) return;
@@ -152,13 +170,72 @@
     btn.id = '__meshyDLBtn';
     btn.textContent = '⏳ Meshy DL';
     btn.style.cssText = `
-      position:fixed;bottom:20px;right:20px;z-index:2147483647;
+      position:fixed;z-index:2147483647;
       background:#333;color:#fff;font:bold 13px monospace;
-      padding:10px 16px;border-radius:8px;cursor:pointer;
-      box-shadow:0 4px 20px rgba(0,0,0,.5);transition:all .2s;
-      border:2px solid #555;user-select:none;
+      padding:10px 16px;border-radius:8px;cursor:grab;
+      box-shadow:0 4px 20px rgba(0,0,0,.5);transition:background .2s,border .2s;
+      border:2px solid #555;user-select:none;touch-action:none;
     `;
-    btn.onclick = () => {
+
+    const savedPos = loadButtonPosition();
+    if (savedPos) {
+      btn.style.left = savedPos.left + 'px';
+      btn.style.top = savedPos.top + 'px';
+    } else {
+      btn.style.right = '20px';
+      btn.style.bottom = '20px';
+    }
+
+    let dragStart = null;
+    let origin = null;
+
+    btn.addEventListener('pointerdown', event => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      btn.setPointerCapture(event.pointerId);
+      btn.style.cursor = 'grabbing';
+      btn.style.transition = 'none';
+
+      const rect = btn.getBoundingClientRect();
+      origin = { x: rect.left, y: rect.top };
+      dragStart = { x: event.clientX, y: event.clientY };
+    });
+
+    btn.addEventListener('pointermove', event => {
+      if (!dragStart) return;
+      event.preventDefault();
+      const dx = event.clientX - dragStart.x;
+      const dy = event.clientY - dragStart.y;
+      const left = Math.max(0, Math.min(window.innerWidth - btn.offsetWidth, origin.x + dx));
+      const top = Math.max(0, Math.min(window.innerHeight - btn.offsetHeight, origin.y + dy));
+      btn.style.left = left + 'px';
+      btn.style.top = top + 'px';
+      btn.style.right = 'auto';
+      btn.style.bottom = 'auto';
+    });
+
+    btn.addEventListener('pointerup', event => {
+      if (!dragStart) return;
+      event.preventDefault();
+      btn.releasePointerCapture(event.pointerId);
+      btn.style.cursor = 'grab';
+      btn.style.transition = 'background .2s,border .2s';
+      dragStart = null;
+      origin = null;
+      saveButtonPosition({ left: btn.offsetLeft, top: btn.offsetTop });
+    });
+
+    btn.addEventListener('pointercancel', () => {
+      if (!dragStart) return;
+      btn.style.cursor = 'grab';
+      btn.style.transition = 'background .2s,border .2s';
+      dragStart = null;
+      origin = null;
+      saveButtonPosition({ left: btn.offsetLeft, top: btn.offsetTop });
+    });
+
+    btn.onclick = event => {
+      if (dragStart) return;
       if (state.status !== 'ready') {
         btn.textContent = '⏳ Pas encore prêt...';
         return;
