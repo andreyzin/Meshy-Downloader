@@ -52,6 +52,16 @@
   window.Worker = PatchedWorker;
 
   // ── Intercept message data ──────────────────────────────────────────────────
+  function buffersAreEqual(a, b) {
+    if (!a || !b || a.byteLength !== b.byteLength) return false;
+    const u1 = new Uint8Array(a);
+    const u2 = new Uint8Array(b);
+    for (let i = 0; i < u1.length; i++) {
+      if (u1[i] !== u2[i]) return false;
+    }
+    return true;
+  }
+
   function tryIntercept(data) {
     if (!data || data.type !== 'process' || !data.success) return;
     const buf = data.data;
@@ -63,7 +73,15 @@
       return;
     }
 
-    state.glb = buf.slice(0);
+    const newGlb = buf.slice(0);
+    if (state.glb && buffersAreEqual(state.glb, newGlb)) return;
+
+    if (state.glb) {
+      console.log('[Meshy DL] 🔄 Nouveau modèle détecté, reset textures');
+      state.textures = [];
+    }
+
+    state.glb = newGlb;
     state.modelName = getModelName();
     state.status = 'ready';
     console.log('[Meshy DL] ✅ GLB intercepté !', (buf.byteLength/1024/1024).toFixed(2), 'MB');
