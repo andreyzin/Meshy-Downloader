@@ -1,121 +1,271 @@
 // WORLD: MAIN — s'exécute dans le contexte de la page, accès direct à window
 // run_at: document_start — avant tout JS de la page
+// all_frames: true — le viewer 3D peut vivre dans une iframe
 (function() {
   'use strict';
 
+  const DEBUG = true;
+  const log = (...a) => console.log('[Meshy DL]', ...a);
+  const dbg = (...a) => { if (DEBUG) console.log('[Meshy DL][dbg]', ...a); };
+
+  const IS_TOP = (() => { try { return window.top === window; } catch (e) { return false; } })();
   const state = { glb: null, textures: [], modelName: '', status: 'idle' };
 
-  // ── Patch Worker ────────────────────────────────────────────────────────────
-  // On intercepte new Worker('/resource/decrypt/loader-worker.min.js')
-  const _Worker = window.Worker;
+  const GLTF_MAGIC = 0x46546c67; // 'glTF' en little-endian
+  const TEX_RE = /\.(png|jpe?g|webp|ktx2|basis)(\?|$)/i;
+  const MODEL_RE = /\.(glb|gltf)(\?|$)/i;
 
-  class PatchedWorker extends _Worker {
-    constructor(url, opts) {
-      super(url, opts);
-      const urlStr = (typeof url === 'string') ? url : String(url);
-      if (!urlStr.includes('loader-worker')) return;
-
-      console.log('[Meshy DL] 🎯 Decrypt worker détecté :', urlStr);
-
-      // Intercepte onmessage via defineProperty
-      let _handler = null;
-      const self = this;
-
-      Object.defineProperty(this, 'onmessage', {
-        get() { return _handler; },
-        set(fn) {
-          _handler = function(ev) {
-            tryIntercept(ev.data);
-            return fn.call(self, ev);
-          };
-          // Appelle le setter natif de Worker
-          _Worker.prototype.__defineGetter__ && null;
-          Object.getOwnPropertyDescriptor(_Worker.prototype, 'onmessage')?.set?.call(self, _handler);
-        },
-        configurable: true
-      });
-
-      // Intercepte aussi addEventListener
-      const origAEL = this.addEventListener.bind(this);
-      this.addEventListener = function(type, fn, opts) {
-        if (type === 'message') {
-          return origAEL(type, function(ev) {
-            tryIntercept(ev.data);
-            return fn.call(this, ev);
-          }, opts);
-        }
-        return origAEL(type, fn, opts);
-      };
-    }
+  // ── Détection GLB ───────────────────────────────────────────────────────────
+  function isGLB(buf) {
+    if (!buf || !buf.byteLength || buf.byteLength < 12) return false;
+    try { return new DataView(buf).getUint32(0, true) === GLTF_MAGIC; } catch (e) { return false; }
   }
 
-  window.Worker = PatchedWorker;
+  function toArrayBuffer(v) {
+    if (v instanceof ArrayBuffer) return v;
+    if (ArrayBuffer.isView(v)) return v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength);
+    return null;
+  }
 
-  // ── Intercept message data ──────────────────────────────────────────────────
+  /** Cherche récursivement un ArrayBuffer GLB dans n'importe quelle structure. */
+  function scanForGLB(value, depth, seen) {
+    if (value == null || depth > 4) return null;
+    const buf = toArrayBuffer(value);
+    if (buf) return isGLB(buf) ? buf : null;
+    if (typeof value !== 'object') return null;
+    seen = seen || new Set();
+    if (seen.has(value)) return null;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (const v of value) { const r = scanForGLB(v, depth + 1, seen); if (r) return r; }
+      return null;
+    }
+    if (value instanceof Map) {
+      for (const v of value.values()) { const r = scanForGLB(v, depth + 1, seen); if (r) return r; }
+      return null;
+    }
+    if (value instanceof Blob) { peekBlob(value, 'blob-in-message'); return null; }
+    for (const k in value) {
+      let v;
+      try { v = value[k]; } catch (e) { continue; }
+      const r = scanForGLB(v, depth + 1, seen);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  function describe(value, depth) {
+    depth = depth || 0;
+    if (value == null) return String(value);
+    if (value instanceof ArrayBuffer) return 'ArrayBuffer(' + value.byteLength + ')';
+    if (ArrayBuffer.isView(value)) return value.constructor.name + '(' + value.byteLength + ')';
+    if (value instanceof Blob) return 'Blob(' + value.size + ',' + value.type + ')';
+    if (typeof value !== 'object' || depth > 2) return typeof value === 'string' ? 'str:' + value.slice(0, 40) : typeof value;
+    if (Array.isArray(value)) return '[' + value.slice(0, 5).map(v => describe(v, depth + 1)).join(',') + ']';
+    const out = {};
+    for (const k in value) { try { out[k] = describe(value[k], depth + 1); } catch (e) {} }
+    return out;
+  }
+
+  /** Point d'entrée unique pour tout message/buffer suspect. */
+  function inspect(data, source) {
+    if (data == null) return;
+    const buf = scanForGLB(data, 0, null);
+    if (buf) { captureGLB(buf, source); return; }
+    if (DEBUG && data && typeof data === 'object') dbg('message', source, describe(data));
+  }
+
+  function peekBlob(blob, source) {
+    if (!blob || blob.size < 12) return;
+    blob.slice(0, 12).arrayBuffer().then(head => {
+      if (!isGLB(head)) return;
+      return blob.arrayBuffer().then(full => captureGLB(full, source));
+    }).catch(() => {});
+  }
+
+  // ── Capture ─────────────────────────────────────────────────────────────────
   function buffersAreEqual(a, b) {
     if (!a || !b || a.byteLength !== b.byteLength) return false;
-    const u1 = new Uint8Array(a);
-    const u2 = new Uint8Array(b);
-    for (let i = 0; i < u1.length; i++) {
-      if (u1[i] !== u2[i]) return false;
-    }
+    const u1 = new Uint8Array(a), u2 = new Uint8Array(b);
+    for (let i = 0; i < u1.length; i++) if (u1[i] !== u2[i]) return false;
     return true;
   }
 
-  function tryIntercept(data) {
-    if (!data || data.type !== 'process' || !data.success) return;
-    const buf = data.data;
-    if (!buf || buf.byteLength < 4) return;
-
-    const magic = String.fromCharCode(...new Uint8Array(buf, 0, 4));
-    if (magic !== 'glTF') {
-      console.log('[Meshy DL] Message process reçu mais magic =', magic);
-      return;
-    }
-
+  function captureGLB(buf, source) {
     const newGlb = buf.slice(0);
     if (state.glb && buffersAreEqual(state.glb, newGlb)) return;
-
-    if (state.glb) {
-      console.log('[Meshy DL] 🔄 Nouveau modèle détecté, reset textures');
-      state.textures = [];
-    }
+    if (state.glb) { log('🔄 Nouveau modèle détecté, reset textures'); state.textures = []; }
 
     state.glb = newGlb;
     state.modelName = getModelName();
     state.status = 'ready';
-    console.log('[Meshy DL] ✅ GLB intercepté !', (buf.byteLength/1024/1024).toFixed(2), 'MB');
+    log('✅ GLB intercepté via', source, (newGlb.byteLength / 1024 / 1024).toFixed(2), 'MB');
+    publish();
+  }
 
-    saveToIDB().then(() => {
-      updateBtn();
-      window.dispatchEvent(new CustomEvent('__meshyDLReady'));
+  function captureTexture(name, buf, source) {
+    if (!name || !buf || !buf.byteLength) return;
+    if (state.textures.find(t => t.name === name)) return;
+    state.textures.push({ name, buf: buf.slice(0) });
+    log('🖼️ Texture:', name, (buf.byteLength / 1024).toFixed(0), 'KB', '(' + source + ')');
+    publish();
+  }
+
+  /** Frame principale → IndexedDB. Iframe → relai postMessage vers le parent. */
+  function publish() {
+    if (IS_TOP) {
+      saveToIDB().then(() => {
+        updateBtn();
+        window.dispatchEvent(new CustomEvent('__meshyDLReady'));
+      }).catch(e => log('IDB error', e));
+      return;
+    }
+    try {
+      if (state.glb && !state.glbRelayed) {
+        state.glbRelayed = true;
+        window.top.postMessage({ __meshyDL: 'glb', name: state.modelName, buf: state.glb.slice(0) }, '*');
+      }
+      for (const t of state.textures) {
+        if (t.relayed) continue;
+        t.relayed = true;
+        window.top.postMessage({ __meshyDL: 'tex', name: t.name, buf: t.buf.slice(0) }, '*');
+      }
+    } catch (e) { dbg('relai impossible', e); }
+  }
+
+  if (IS_TOP) {
+    window.addEventListener('message', ev => {
+      const d = ev.data;
+      if (!d || typeof d !== 'object' || !d.__meshyDL) return;
+      const buf = toArrayBuffer(d.buf);
+      if (!buf) return;
+      if (d.__meshyDL === 'glb') {
+        if (d.name) state.modelName = d.name;
+        captureGLB(buf, 'iframe-relay');
+      } else if (d.__meshyDL === 'tex') {
+        captureTexture(d.name, buf, 'iframe-relay');
+      }
     });
   }
 
-  // ── Patch fetch pour les textures ──────────────────────────────────────────
+  // ── Patch Worker / MessagePort ──────────────────────────────────────────────
+  const wrapped = new WeakMap();
+
+  function patchMessageTarget(proto, label) {
+    if (!proto) return;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'onmessage');
+    if (desc && desc.set) {
+      Object.defineProperty(proto, 'onmessage', {
+        configurable: true,
+        enumerable: desc.enumerable,
+        get() { return this.__meshyOnMsg || desc.get.call(this); },
+        set(fn) {
+          this.__meshyOnMsg = fn;
+          if (typeof fn !== 'function') return desc.set.call(this, fn);
+          desc.set.call(this, function(ev) { inspect(ev.data, label + '.onmessage'); return fn.apply(this, arguments); });
+        }
+      });
+    }
+    const origAdd = proto.addEventListener || EventTarget.prototype.addEventListener;
+    const origRemove = proto.removeEventListener || EventTarget.prototype.removeEventListener;
+    Object.defineProperty(proto, 'addEventListener', {
+      configurable: true, writable: true,
+      value: function(type, fn, opts) {
+        if (type !== 'message' || !fn) return origAdd.call(this, type, fn, opts);
+        let w = wrapped.get(fn);
+        if (!w) {
+          const cb = typeof fn === 'function' ? fn : fn.handleEvent.bind(fn);
+          w = function(ev) { inspect(ev.data, label + '.addEventListener'); return cb.apply(this, arguments); };
+          wrapped.set(fn, w);
+        }
+        return origAdd.call(this, type, w, opts);
+      }
+    });
+    Object.defineProperty(proto, 'removeEventListener', {
+      configurable: true, writable: true,
+      value: function(type, fn, opts) {
+        const w = (type === 'message' && fn && wrapped.get(fn)) || fn;
+        return origRemove.call(this, type, w, opts);
+      }
+    });
+  }
+
+  patchMessageTarget(window.Worker && window.Worker.prototype, 'Worker');
+  patchMessageTarget(window.MessagePort && window.MessagePort.prototype, 'MessagePort');
+  patchMessageTarget(window.BroadcastChannel && window.BroadcastChannel.prototype, 'BroadcastChannel');
+
+  // Log de tous les workers créés (diagnostic : nom réel du worker de décryptage)
+  if (window.Worker) {
+    const _Worker = window.Worker;
+    class LoggedWorker extends _Worker {
+      constructor(url, opts) {
+        super(url, opts);
+        log('👷 new Worker:', String(url), opts || '');
+      }
+    }
+    window.Worker = LoggedWorker;
+  }
+
+  // ── Patch fetch ─────────────────────────────────────────────────────────────
   const _fetch = window.fetch;
   window.fetch = async function(...args) {
+    const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
     const resp = await _fetch.apply(this, args);
-    const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
-
-    if (url.includes('assets.meshy.ai') && url.includes('.png')) {
-      resp.clone().arrayBuffer().then(buf => {
-        const name = url.split('/').pop().split('?')[0];
-        if (!state.textures.find(t => t.name === name)) {
-          state.textures.push({ name, buf: buf.slice(0) });
-          console.log('[Meshy DL] 🖼️ Texture:', name, (buf.byteLength/1024).toFixed(0), 'KB');
-          saveToIDB();
-        }
-      }).catch(() => {});
-    }
+    try { harvestResponse(url, resp.clone(), 'fetch'); } catch (e) {}
     return resp;
+  };
+
+  function harvestResponse(url, resp, source) {
+    if (!url || url.indexOf('meshy') === -1) return;
+    if (url.indexOf('assets.meshy.ai') !== -1) dbg('asset', source, url.split('?')[0]);
+    const isTex = TEX_RE.test(url);
+    const isModel = MODEL_RE.test(url) || /\.meshy(\?|$)/i.test(url);
+    if (!isTex && !isModel) return;
+    resp.arrayBuffer().then(buf => {
+      if (isTex) return captureTexture(url.split('/').pop().split('?')[0], buf, source);
+      if (isGLB(buf)) captureGLB(buf, source + ':' + url.split('/').pop().split('?')[0]);
+      else dbg('modèle non-GLB (chiffré ?)', url.split('?')[0], buf.byteLength, 'octets');
+    }).catch(() => {});
+  }
+
+  // ── Patch XMLHttpRequest ────────────────────────────────────────────────────
+  const _open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    this.__meshyUrl = String(url || '');
+    return _open.apply(this, arguments);
+  };
+  const _send = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function() {
+    this.addEventListener('load', () => {
+      const url = this.__meshyUrl || '';
+      if (!url || url.indexOf('meshy') === -1) return;
+      const r = this.response;
+      if (r instanceof Blob) { peekBlob(r, 'xhr'); if (TEX_RE.test(url)) r.arrayBuffer().then(b => captureTexture(url.split('/').pop().split('?')[0], b, 'xhr')); return; }
+      const buf = toArrayBuffer(r);
+      if (!buf) return;
+      if (isGLB(buf)) captureGLB(buf, 'xhr:' + url.split('/').pop().split('?')[0]);
+      else if (TEX_RE.test(url)) captureTexture(url.split('/').pop().split('?')[0], buf, 'xhr');
+      else dbg('xhr', url.split('?')[0], buf.byteLength, 'octets');
+    });
+    return _send.apply(this, arguments);
+  };
+
+  // ── Patch URL.createObjectURL (GLB passé sous forme de Blob) ────────────────
+  const _createObjectURL = URL.createObjectURL;
+  URL.createObjectURL = function(obj) {
+    if (obj instanceof Blob && obj.size > 1024) peekBlob(obj, 'createObjectURL');
+    return _createObjectURL.call(this, obj);
   };
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function getModelName() {
     const h1 = document.querySelector('h1');
-    if (h1?.textContent) return h1.textContent.trim().replace(/[^\w\-. ]/g, '_').trim() || 'model';
-    return document.title.split('|')[0].trim().replace(/[^\w\-. ]/g, '_') || 'model';
+    if (h1 && h1.textContent) {
+      const n = h1.textContent.trim().replace(/[^\w\-. ]/g, '_').trim();
+      if (n) return n;
+    }
+    const t = (document.title || '').split('|')[0].trim().replace(/[^\w\-. ]/g, '_').trim();
+    return t || 'model';
   }
 
   // ── IndexedDB ──────────────────────────────────────────────────────────────
@@ -243,12 +393,7 @@
       downloadAll();
     };
 
-    window.addEventListener('__meshyDLReady', () => {
-      const texInfo = state.textures.length > 0 ? ` + ${state.textures.length} tex` : '';
-      btn.textContent = `⬇️ GLB${texInfo} — Télécharger`;
-      btn.style.background = '#1f6feb';
-      btn.style.border = '2px solid #58a6ff';
-    });
+    window.addEventListener('__meshyDLReady', updateBtn);
 
     document.body?.appendChild(btn);
   }
@@ -270,19 +415,20 @@
 
   function updateBtn() {
     const btn = document.getElementById('__meshyDLBtn');
-    if (btn) {
-      const texInfo = state.textures.length > 0 ? ` + ${state.textures.length} tex` : '';
-      btn.textContent = `⬇️ GLB${texInfo} — Télécharger`;
-      btn.style.background = '#1f6feb';
-      btn.style.border = '2px solid #58a6ff';
-    }
+    if (!btn) return;
+    const texInfo = state.textures.length > 0 ? ` + ${state.textures.length} tex` : '';
+    btn.textContent = `⬇️ GLB${texInfo} — Télécharger`;
+    btn.style.background = '#1f6feb';
+    btn.style.border = '2px solid #58a6ff';
   }
 
-  // Attend que le body soit dispo
-  if (document.body) injectBtn();
-  else new MutationObserver((_, obs) => {
-    if (document.body) { injectBtn(); obs.disconnect(); }
-  }).observe(document.documentElement, { childList: true });
+  // Bouton uniquement dans la frame principale
+  if (IS_TOP) {
+    if (document.body) injectBtn();
+    else new MutationObserver((_, obs) => {
+      if (document.body) { injectBtn(); obs.disconnect(); }
+    }).observe(document.documentElement, { childList: true });
+  }
 
-  console.log('[Meshy DL] ✅ Extension chargée (MAIN world, document_start)');
+  log('✅ Extension chargée (MAIN world, document_start,', IS_TOP ? 'top frame' : 'iframe ' + location.href.slice(0, 60), ')');
 })();
