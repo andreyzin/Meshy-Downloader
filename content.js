@@ -336,12 +336,15 @@
       btn.style.bottom = '20px';
     }
 
+    const DRAG_THRESHOLD = 4; // px — ниже этого порога жест считается кликом
     let dragStart = null;
     let origin = null;
+    let moved = false;
 
     btn.addEventListener('pointerdown', event => {
       if (event.button !== 0) return;
       event.preventDefault();
+      moved = false;
       btn.setPointerCapture(event.pointerId);
       btn.style.cursor = 'grabbing';
       btn.style.transition = 'none';
@@ -356,6 +359,7 @@
       event.preventDefault();
       const dx = event.clientX - dragStart.x;
       const dy = event.clientY - dragStart.y;
+      if (!moved && Math.hypot(dx, dy) > DRAG_THRESHOLD) moved = true;
       const left = Math.max(0, Math.min(window.innerWidth - btn.offsetWidth, origin.x + dx));
       const top = Math.max(0, Math.min(window.innerHeight - btn.offsetHeight, origin.y + dy));
       btn.style.left = left + 'px';
@@ -372,7 +376,7 @@
       btn.style.transition = 'background .2s,border .2s';
       dragStart = null;
       origin = null;
-      saveButtonPosition({ left: btn.offsetLeft, top: btn.offsetTop });
+      if (moved) saveButtonPosition({ left: btn.offsetLeft, top: btn.offsetTop });
     });
 
     btn.addEventListener('pointercancel', () => {
@@ -381,17 +385,23 @@
       btn.style.transition = 'background .2s,border .2s';
       dragStart = null;
       origin = null;
-      saveButtonPosition({ left: btn.offsetLeft, top: btn.offsetTop });
+      if (moved) saveButtonPosition({ left: btn.offsetLeft, top: btn.offsetTop });
     });
 
-    btn.onclick = event => {
-      if (dragStart) return;
+    // click приходит уже после pointerup, поэтому решение принимаем по флагу moved
+    btn.addEventListener('click', event => {
+      if (moved) {
+        moved = false;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (state.status !== 'ready') {
         btn.textContent = '⏳ Ещё не готово...';
         return;
       }
       downloadAll();
-    };
+    }, true);
 
     window.addEventListener('__meshyDLReady', updateBtn);
 
