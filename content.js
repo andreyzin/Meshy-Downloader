@@ -326,19 +326,125 @@
     } catch (e) {}
   }
 
-  // ── Плавающая кнопка ────────────────────────────────────────────────────────
+  // ── Конвертация геометрии ──────────────────────────────────────────────────
+  const FORMATS = ['glb', 'stl', 'obj', '3mf'];
+  const PREFS_KEY = '__meshyDLPrefs';
+
+  function loadPrefs() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
+      return {
+        format: FORMATS.indexOf(raw.format) >= 0 ? raw.format : 'glb',
+        ratio: Number.isFinite(raw.ratio) ? Math.min(100, Math.max(5, raw.ratio)) : 100
+      };
+    } catch (e) { return { format: 'glb', ratio: 100 }; }
+  }
+
+  function savePrefs() {
+    try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (e) {}
+  }
+
+  const prefs = loadPrefs();
+
+  let _worker = null, _workerBroken = false, _jobId = 0;
+  const _jobs = new Map();
+
+  /** Воркер собирается из исходника geometry.js, чтобы не вешать вкладку. */
+  function ensureWorker() {
+    if (_worker || _workerBroken) return _worker;
+    try {
+      const factory = window.__meshyGeomFactory;
+      if (!factory) throw new Error('geometry.js не загружен');
+      const src = 'const GEOM = (' + factory.toString() + ')();\n'
+        + 'self.onmessage = function(e) { var d = e.data; try {'
+        + ' if (d.op === "analyze") { self.postMessage({ id: d.id, ok: true, result: GEOM.analyze(d.glb) }); return; }'
+        + ' var r = GEOM.convert(d.glb, d.format, d.ratio, d.name);'
+        + ' self.postMessage({ id: d.id, ok: true, result: r }, [r.buffer]);'
+        + ' } catch (err) { self.postMessage({ id: d.id, ok: false, error: String((err && err.message) || err) }); } };';
+      const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      _worker = new Worker(url);
+      _worker.addEventListener('message', ev => {
+        const job = _jobs.get(ev.data.id);
+        if (!job) return;
+        _jobs.delete(ev.data.id);
+        if (ev.data.ok) job.resolve(ev.data.result); else job.reject(new Error(ev.data.error));
+      });
+      _worker.addEventListener('error', e => {
+        log('Воркер конвертации недоступен, считаем в главном потоке', e.message || '');
+        _workerBroken = true;
+        _worker = null;
+      });
+    } catch (e) {
+      dbg('Воркер не создан:', e.message);
+      _workerBroken = true;
+      _worker = null;
+    }
+    return _worker;
+  }
+
+  function runJob(message) {
+    const worker = ensureWorker();
+    if (!worker) {
+      // Запасной путь: страница с запретом blob-воркеров считает в главном потоке
+      return new Promise((resolve, reject) => setTimeout(() => {
+        try {
+          const G = window.__meshyGeom;
+          if (!G) throw new Error('geometry.js не загружен');
+          resolve(message.op === 'analyze'
+            ? G.analyze(message.glb)
+            : G.convert(message.glb, message.format, message.ratio, message.name));
+        } catch (e) { reject(e); }
+      }, 10));
+    }
+    const id = ++_jobId;
+    return new Promise((resolve, reject) => {
+      _jobs.set(id, { resolve, reject });
+      worker.postMessage(Object.assign({ id }, message));
+    });
+  }
+
+  let _analysis = null, _analysisFor = null;
+  function getAnalysis() {
+    if (_analysis && _analysisFor === state.glb) return Promise.resolve(_analysis);
+    return runJob({ op: 'analyze', glb: state.glb }).then(r => {
+      _analysis = r; _analysisFor = state.glb;
+      return r;
+    });
+  }
+
+  function formatNumber(n) {
+    return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  }
+
+  // ── Плавающая кнопка и панель настроек ─────────────────────────────────────
+  let _busy = false;
+
+  function el(tag, style, text) {
+    const e = document.createElement(tag);
+    if (style) e.style.cssText = style;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
   function injectBtn() {
     if (document.getElementById('__meshyDLBtn')) return;
-    const btn = document.createElement('div');
-    btn.id = '__meshyDLBtn';
-    btn.textContent = '⏳ Meshy DL';
-    btn.style.cssText = `
-      position:fixed;z-index:2147483647;
+
+    const btn = el('div', `
+      position:fixed;z-index:2147483647;display:flex;align-items:center;gap:9px;
       background:#333;color:#fff;font:bold 13px monospace;
-      padding:10px 16px;border-radius:8px;cursor:grab;
+      padding:10px 14px;border-radius:8px;cursor:grab;
       box-shadow:0 4px 20px rgba(0,0,0,.5);transition:background .2s,border .2s;
       border:2px solid #555;user-select:none;touch-action:none;
-    `;
+    `);
+    btn.id = '__meshyDLBtn';
+
+    const label = el('span', null, '⏳ Meshy DL');
+    label.id = '__meshyDLLabel';
+    const gear = el('span', 'opacity:.7;font-size:15px;line-height:1;padding:0 1px;cursor:pointer;', '⚙');
+    gear.id = '__meshyDLGear';
+    gear.title = 'Формат и упрощение';
+    btn.appendChild(label);
+    btn.appendChild(gear);
 
     const savedPos = loadButtonPosition();
     if (savedPos) {
@@ -349,6 +455,129 @@
       btn.style.bottom = '20px';
     }
 
+    // ── Панель настроек ──
+    const panel = el('div', `
+      position:fixed;z-index:2147483647;display:none;width:252px;
+      background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:10px;
+      padding:12px;font:12px/1.45 'Segoe UI',system-ui,sans-serif;
+      box-shadow:0 8px 30px rgba(0,0,0,.6);user-select:none;
+    `);
+    panel.id = '__meshyDLPanel';
+
+    panel.appendChild(el('div', 'color:#8b949e;margin-bottom:6px', 'Формат'));
+    const formatRow = el('div', 'display:flex;gap:4px;margin-bottom:12px');
+    const formatBtns = {};
+    for (const f of FORMATS) {
+      const b = el('div', `
+        flex:1;text-align:center;padding:6px 0;border-radius:6px;cursor:pointer;
+        border:1px solid #30363d;background:#0d1117;font-size:11px;
+      `, f.toUpperCase());
+      b.addEventListener('click', () => {
+        prefs.format = f;
+        savePrefs();
+        paintFormats();
+        syncRatioControls();
+        refreshStats();
+        updateBtn();
+      });
+      formatBtns[f] = b;
+      formatRow.appendChild(b);
+    }
+    panel.appendChild(formatRow);
+
+    const ratioHead = el('div', 'display:flex;justify-content:space-between;color:#8b949e');
+    ratioHead.appendChild(el('span', null, 'Детализация'));
+    const ratioVal = el('span', 'color:#e6edf3', prefs.ratio + '%');
+    ratioHead.appendChild(ratioVal);
+    panel.appendChild(ratioHead);
+
+    const ratio = document.createElement('input');
+    ratio.type = 'range';
+    ratio.min = '5'; ratio.max = '100'; ratio.step = '5';
+    ratio.value = String(prefs.ratio);
+    ratio.style.cssText = 'width:100%;margin:6px 0;accent-color:#1f6feb';
+    ratio.addEventListener('input', () => {
+      prefs.ratio = Number(ratio.value);
+      ratioVal.textContent = prefs.ratio + '%';
+      updateBtn();
+    });
+    ratio.addEventListener('change', () => { savePrefs(); refreshStats(); });
+    panel.appendChild(ratio);
+
+    const stats = el('div', 'color:#6e7681;font-size:11px;min-height:17px');
+    stats.id = '__meshyDLStats';
+    panel.appendChild(stats);
+
+    const go = el('div', `
+      margin-top:10px;text-align:center;padding:8px 0;border-radius:6px;
+      background:#238636;color:#fff;cursor:pointer;font-size:13px;
+    `, '⬇️ Скачать');
+    go.addEventListener('click', () => { hidePanel(); downloadCurrent(); });
+    panel.appendChild(go);
+
+    function paintFormats() {
+      for (const f of FORMATS) {
+        const active = f === prefs.format;
+        formatBtns[f].style.background = active ? '#1f6feb' : '#0d1117';
+        formatBtns[f].style.borderColor = active ? '#58a6ff' : '#30363d';
+        formatBtns[f].style.color = active ? '#fff' : '#8b949e';
+      }
+    }
+
+    function syncRatioControls() {
+      const off = prefs.format === 'glb';
+      ratio.disabled = off;
+      ratio.style.opacity = off ? '.4' : '1';
+      ratioHead.style.opacity = off ? '.4' : '1';
+    }
+
+    function refreshStats() {
+      if (prefs.format === 'glb') {
+        stats.textContent = state.textures.length
+          ? 'Исходный GLB + ' + state.textures.length + ' текстур'
+          : 'Исходный GLB без изменений';
+        return;
+      }
+      if (!state.glb) { stats.textContent = 'Модель ещё не перехвачена'; return; }
+      stats.textContent = 'Подсчёт треугольников...';
+      getAnalysis().then(a => {
+        const target = Math.max(4, Math.round(a.triangles * prefs.ratio / 100));
+        stats.textContent = formatNumber(a.triangles) + ' → ' + formatNumber(target) + ' △';
+      }).catch(e => {
+        stats.textContent = 'Разбор не удался: ' + e.message.slice(0, 48);
+      });
+    }
+
+    function positionPanel() {
+      const r = btn.getBoundingClientRect();
+      panel.style.visibility = 'hidden';
+      panel.style.display = 'block';
+      const ph = panel.offsetHeight, pw = panel.offsetWidth;
+      let top = r.top - ph - 8;
+      if (top < 8) top = Math.min(window.innerHeight - ph - 8, r.bottom + 8);
+      const left = Math.min(window.innerWidth - pw - 8, Math.max(8, r.right - pw));
+      panel.style.top = Math.max(8, top) + 'px';
+      panel.style.left = left + 'px';
+      panel.style.visibility = 'visible';
+    }
+
+    function hidePanel() { panel.style.display = 'none'; }
+
+    function togglePanel() {
+      if (panel.style.display === 'block') { hidePanel(); return; }
+      paintFormats();
+      syncRatioControls();
+      positionPanel();
+      refreshStats();
+    }
+
+    document.addEventListener('click', ev => {
+      if (panel.style.display !== 'block') return;
+      if (panel.contains(ev.target) || btn.contains(ev.target)) return;
+      hidePanel();
+    }, true);
+
+    // ── Перетаскивание ──
     const DRAG_THRESHOLD = 4; // px — ниже этого порога жест считается кликом
     let dragStart = null;
     let origin = null;
@@ -379,27 +608,25 @@
       btn.style.top = top + 'px';
       btn.style.right = 'auto';
       btn.style.bottom = 'auto';
+      if (moved && panel.style.display === 'block') hidePanel();
     });
+
+    const endDrag = () => {
+      btn.style.cursor = 'grab';
+      btn.style.transition = 'background .2s,border .2s';
+      dragStart = null;
+      origin = null;
+      if (moved) saveButtonPosition({ left: btn.offsetLeft, top: btn.offsetTop });
+    };
 
     btn.addEventListener('pointerup', event => {
       if (!dragStart) return;
       event.preventDefault();
       btn.releasePointerCapture(event.pointerId);
-      btn.style.cursor = 'grab';
-      btn.style.transition = 'background .2s,border .2s';
-      dragStart = null;
-      origin = null;
-      if (moved) saveButtonPosition({ left: btn.offsetLeft, top: btn.offsetTop });
+      endDrag();
     });
 
-    btn.addEventListener('pointercancel', () => {
-      if (!dragStart) return;
-      btn.style.cursor = 'grab';
-      btn.style.transition = 'background .2s,border .2s';
-      dragStart = null;
-      origin = null;
-      if (moved) saveButtonPosition({ left: btn.offsetLeft, top: btn.offsetTop });
-    });
+    btn.addEventListener('pointercancel', () => { if (dragStart) endDrag(); });
 
     // click приходит уже после pointerup, поэтому решение принимаем по флагу moved
     btn.addEventListener('click', event => {
@@ -409,16 +636,18 @@
         event.stopPropagation();
         return;
       }
-      if (state.status !== 'ready') {
-        btn.textContent = '⏳ Ещё не готово...';
-        return;
-      }
-      downloadAll();
+      if (event.target === gear) { togglePanel(); return; }
+      if (state.status !== 'ready') { setBtnBusy('⏳ Ещё не готово...', 1500); return; }
+      downloadCurrent();
     }, true);
 
-    window.addEventListener('__meshyDLReady', updateBtn);
+    window.addEventListener('__meshyDLReady', () => {
+      updateBtn();
+      if (panel.style.display === 'block') refreshStats();
+    });
 
     document.body?.appendChild(btn);
+    document.body?.appendChild(panel);
   }
 
   function downloadAll() {
@@ -426,6 +655,29 @@
     state.textures.forEach((t, i) =>
       setTimeout(() => dl(t.buf, t.name, 'image/png'), 300 * (i + 1))
     );
+  }
+
+  /** Скачивание в текущем выбранном формате с учётом степени упрощения. */
+  function downloadCurrent() {
+    if (state.status !== 'ready' || !state.glb) return Promise.resolve();
+    if (prefs.format === 'glb') { downloadAll(); return Promise.resolve(); }
+
+    setBtnBusy(prefs.ratio < 100 ? '⏳ Упрощение...' : '⏳ Конвертация...');
+    return runJob({
+      op: 'convert',
+      glb: state.glb,
+      format: prefs.format,
+      ratio: prefs.ratio / 100,
+      name: state.modelName
+    }).then(r => {
+      const suffix = prefs.ratio < 100 ? '_' + prefs.ratio + 'pct' : '';
+      dl(r.buffer, state.modelName + suffix + '.' + r.ext, r.mime);
+      log('✅ ' + r.ext.toUpperCase() + ':', formatNumber(r.origTris), '→', formatNumber(r.outTris), 'треугольников');
+      updateBtn();
+    }).catch(e => {
+      log('❌ Конвертация не удалась:', e.message);
+      setBtnBusy('❌ ' + e.message.slice(0, 46), 5000);
+    });
   }
 
   function dl(buf, name, mime) {
@@ -436,11 +688,23 @@
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
   }
 
+  function setBtnBusy(text, restoreAfter) {
+    const label = document.getElementById('__meshyDLLabel');
+    if (!label) return;
+    _busy = true;
+    label.textContent = text;
+    if (restoreAfter) setTimeout(() => { _busy = false; updateBtn(); }, restoreAfter);
+  }
+
   function updateBtn() {
     const btn = document.getElementById('__meshyDLBtn');
-    if (!btn) return;
-    const texInfo = state.textures.length > 0 ? ` + ${state.textures.length} tex` : '';
-    btn.textContent = `⬇️ GLB${texInfo} — Скачать`;
+    const label = document.getElementById('__meshyDLLabel');
+    if (!btn || !label) return;
+    _busy = false;
+    if (state.status !== 'ready') { label.textContent = '⏳ Meshy DL'; return; }
+    const detail = prefs.format !== 'glb' && prefs.ratio < 100 ? ' ' + prefs.ratio + '%' : '';
+    const tex = prefs.format === 'glb' && state.textures.length ? ' + ' + state.textures.length + ' tex' : '';
+    label.textContent = '⬇️ ' + prefs.format.toUpperCase() + detail + tex + ' — Скачать';
     btn.style.background = '#1f6feb';
     btn.style.border = '2px solid #58a6ff';
   }
@@ -454,7 +718,7 @@
         modelName: state.modelName,
         texNames: state.textures.map(t => t.name)
       }),
-      download: () => { downloadAll(); return true; }
+      download: () => { downloadCurrent(); return true; }
     };
   }
 
