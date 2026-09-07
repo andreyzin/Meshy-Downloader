@@ -1,29 +1,17 @@
 let currentTabId = null;
-let meta = null;
-let texNames = [];
+let pageState = null;
 
-async function readFromPageIDB(tabId) {
-  const results = await chrome.scripting.executeScript({
+/** Читает живое состояние из главного фрейма страницы. */
+async function readFromPage(tabId) {
+  const [res] = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
-    func: () => new Promise(resolve => {
-      const r = indexedDB.open('meshy_dl', 2);
-      r.onsuccess = e => {
-        const db = e.target.result;
-        const tx = db.transaction('files', 'readonly');
-        const s = tx.objectStore('files');
-        const out = {};
-        const gets = [
-          s.get('meta').onsuccess = ev => out.meta = ev.target.result,
-          s.get('texNames').onsuccess = ev => out.texNames = ev.target.result || [],
-        ];
-        tx.oncomplete = () => resolve(out);
-        tx.onerror = () => resolve({});
-      };
-      r.onerror = () => resolve({});
-    })
+    func: () => {
+      if (window.__meshyDL && window.__meshyDL.getState) return window.__meshyDL.getState();
+      return { error: 'no-script' };
+    }
   });
-  return results?.[0]?.result || {};
+  return res?.result || { error: 'no-result' };
 }
 
 function setStatus(type, text) {
@@ -31,17 +19,17 @@ function setStatus(type, text) {
   document.getElementById('statusText').textContent = text;
 }
 
-function render(m, tNames) {
+function render(st) {
   const list = document.getElementById('fileList');
   list.innerHTML = '';
-  if (!m || m.glbSize === 0) return;
+  if (!st || !st.glbSize) return;
 
   list.innerHTML += `<div class="file-row">
-    <span>📄 ${m.modelName || 'model'}.glb <span class="badge badge-glb">GLB</span></span>
-    <span style="color:#8b949e">${(m.glbSize/1024/1024).toFixed(1)} MB</span>
+    <span>📄 ${st.modelName || 'model'}.glb <span class="badge badge-glb">GLB</span></span>
+    <span style="color:#8b949e">${(st.glbSize/1024/1024).toFixed(1)} MB</span>
   </div>`;
 
-  (tNames || []).forEach(name => {
+  (st.texNames || []).forEach(name => {
     list.innerHTML += `<div class="file-row">
       <span>🖼️ ${name} <span class="badge badge-tex">PNG</span></span>
     </div>`;
@@ -59,16 +47,27 @@ async function refresh() {
     }
     currentTabId = tab.id;
 
-    const data = await readFromPageIDB(tab.id);
-    meta = data.meta;
-    texNames = data.texNames || [];
+    const st = await readFromPage(tab.id);
+    pageState = st;
 
-    if (meta?.status === 'ready' && meta.glbSize > 0) {
+    if (st.error === 'no-script') {
+      setStatus('error', 'Скрипт не загружен');
+      document.getElementById('hint').textContent =
+        '💡 Перезагрузите страницу Meshy после установки или обновления расширения.';
+      return;
+    }
+    if (st.error) {
+      setStatus('error', 'Нет ответа от страницы');
+      return;
+    }
+
+    if (st.status === 'ready' && st.glbSize > 0) {
       setStatus('ready', 'Модель перехвачена ✅');
-      render(meta, texNames);
-      document.getElementById('hint').textContent = `Перехвачено текстур: ${texNames.length}.`;
+      render(st);
+      document.getElementById('hint').textContent = `Перехвачено текстур: ${(st.texNames || []).length}.`;
     } else {
       setStatus('waiting', 'Ожидание модели...');
+      document.getElementById('btnDl').disabled = true;
       document.getElementById('hint').textContent =
         '💡 Дайте просмотрщику 3D полностью загрузить модель.';
     }
@@ -78,42 +77,21 @@ async function refresh() {
 }
 
 window.downloadAll = async function() {
-  if (!currentTabId || !meta) return;
-  document.getElementById('btnDl').disabled = true;
-  document.getElementById('btnDl').textContent = '⏳ ...';
+  if (!currentTabId || !pageState?.glbSize) return;
+  const btn = document.getElementById('btnDl');
+  btn.disabled = true;
+  btn.textContent = '⏳ ...';
 
   await chrome.scripting.executeScript({
     target: { tabId: currentTabId },
     world: 'MAIN',
-    func: async (modelName, tNames) => {
-      function dl(buf, name, mime) {
-        const a = Object.assign(document.createElement('a'), {
-          href: URL.createObjectURL(new Blob([buf], { type: mime })),
-          download: name
-        });
-        document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      }
-      const db = await new Promise((res, rej) => {
-        const r = indexedDB.open('meshy_dl', 2);
-        r.onsuccess = e => res(e.target.result);
-        r.onerror = rej;
-      });
-      const tx = db.transaction('files', 'readonly');
-      const s = tx.objectStore('files');
-      s.get('glb').onsuccess = e => { if (e.target.result) dl(e.target.result, modelName + '.glb', 'model/gltf-binary'); };
-      tNames.forEach((name, i) => {
-        s.get('tex_' + name).onsuccess = e => {
-          if (e.target.result) setTimeout(() => dl(e.target.result, name, 'image/png'), 400*(i+1));
-        };
-      });
-    },
-    args: [meta.modelName || 'model', texNames]
+    func: () => { window.__meshyDL?.download(); }
   });
 
-  document.getElementById('btnDl').textContent = '✅ Скачано!';
+  btn.textContent = '✅ Скачано!';
   setTimeout(() => {
-    document.getElementById('btnDl').disabled = false;
-    document.getElementById('btnDl').textContent = '⬇️ Скачать всё';
+    btn.disabled = false;
+    btn.textContent = '⬇️ Скачать всё';
   }, 2000);
 };
 

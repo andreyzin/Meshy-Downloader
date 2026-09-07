@@ -273,13 +273,26 @@
   function openDB() {
     return new Promise((res, rej) => {
       if (_db) { res(_db); return; }
-      const r = indexedDB.open('meshy_dl', 2);
-      r.onupgradeneeded = e => {
+      const req = indexedDB.open('meshy_dl', 2);
+      req.onupgradeneeded = e => {
         const d = e.target.result;
         if (!d.objectStoreNames.contains('files')) d.createObjectStore('files');
       };
-      r.onsuccess = e => { _db = e.target.result; res(_db); };
-      r.onerror = rej;
+      req.onerror = () => rej(req.error);
+      req.onsuccess = e => {
+        const d = e.target.result;
+        if (d.objectStoreNames.contains('files')) { _db = d; res(d); return; }
+        // База есть, а хранилища нет (её мог создать старый попап) — чиним поднятием версии
+        const nextVersion = d.version + 1;
+        d.close();
+        const up = indexedDB.open('meshy_dl', nextVersion);
+        up.onupgradeneeded = ev => {
+          const d2 = ev.target.result;
+          if (!d2.objectStoreNames.contains('files')) d2.createObjectStore('files');
+        };
+        up.onsuccess = ev => { _db = ev.target.result; log('🛠️ Хранилище IndexedDB пересоздано'); res(_db); };
+        up.onerror = () => rej(up.error);
+      };
     });
   }
 
@@ -430,6 +443,19 @@
     btn.textContent = `⬇️ GLB${texInfo} — Скачать`;
     btn.style.background = '#1f6feb';
     btn.style.border = '2px solid #58a6ff';
+  }
+
+  // API страницы для попапа: живое состояние надёжнее чтения IndexedDB
+  if (IS_TOP) {
+    window.__meshyDL = {
+      getState: () => ({
+        status: state.status,
+        glbSize: state.glb ? state.glb.byteLength : 0,
+        modelName: state.modelName,
+        texNames: state.textures.map(t => t.name)
+      }),
+      download: () => { downloadAll(); return true; }
+    };
   }
 
   // Кнопка только в главном фрейме
