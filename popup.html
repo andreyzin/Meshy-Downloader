@@ -24,6 +24,16 @@
   .btn:hover:not(:disabled) { background: #2ea043; }
   .btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
   .hint { color: #6e7681; font-size: 11px; margin-top: 10px; line-height: 1.5; }
+  .settings { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .row { display: flex; justify-content: space-between; align-items: center; color: #8b949e; font-size: 12px; }
+  .formats { display: flex; gap: 4px; margin: 6px 0 12px; }
+  .fmt { flex: 1; text-align: center; padding: 6px 0; border-radius: 6px; cursor: pointer;
+    border: 1px solid #30363d; background: #0d1117; color: #8b949e; font-size: 11px; }
+  .fmt.active { background: #1f6feb; border-color: #58a6ff; color: #fff; }
+  input[type=range] { width: 100%; margin: 6px 0; accent-color: #1f6feb; }
+  input[type=range]:disabled { opacity: .4; }
+  .stats { color: #6e7681; font-size: 11px; min-height: 16px; }
+  .dim { opacity: .4; }
 </style>
 </head>
 <body>
@@ -35,8 +45,16 @@
   <span id="statusText">Ожидание...</span>
 </div>
 
+<div class="settings">
+  <div class="row"><span>Формат</span></div>
+  <div class="formats" id="formats"></div>
+  <div class="row" id="ratioRow"><span>Детализация</span><span id="ratioVal">100%</span></div>
+  <input type="range" id="ratio" min="5" max="100" step="5" value="100">
+  <div class="stats" id="stats"></div>
+</div>
+
 <div id="fileList"></div>
-<button class="btn" id="btnDl" disabled onclick="downloadAll()">⬇️ Скачать всё</button>
+<button class="btn" id="btnDl" disabled>⬇️ Скачать</button>
 
 <p class="hint" id="hint">💡 Перейдите на страницу модели Meshy.<br>Просмотрщик 3D должен загрузить модель.</p>
 
