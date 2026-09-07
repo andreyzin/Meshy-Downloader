@@ -418,6 +418,7 @@
 
   // ── Плавающая кнопка и панель настроек ─────────────────────────────────────
   let _busy = false;
+  let _panelSync = null; // задаётся в injectBtn, вызывается при смене настроек извне
 
   function el(tag, style, text) {
     const e = document.createElement(tag);
@@ -440,9 +441,9 @@
 
     const label = el('span', null, '⏳ Meshy DL');
     label.id = '__meshyDLLabel';
-    const gear = el('span', 'opacity:.7;font-size:15px;line-height:1;padding:0 1px;cursor:pointer;', '⚙');
+    const gear = el('span', 'opacity:.7;font-size:15px;line-height:1;padding:0 1px;', '⚙');
     gear.id = '__meshyDLGear';
-    gear.title = 'Формат и упрощение';
+    btn.title = 'Формат, упрощение и скачивание';
     btn.appendChild(label);
     btn.appendChild(gear);
 
@@ -512,8 +513,20 @@
       margin-top:10px;text-align:center;padding:8px 0;border-radius:6px;
       background:#238636;color:#fff;cursor:pointer;font-size:13px;
     `, '⬇️ Скачать');
-    go.addEventListener('click', () => { hidePanel(); downloadCurrent(); });
+    go.addEventListener('click', () => {
+      if (state.status !== 'ready' || !state.glb) return;
+      hidePanel();
+      downloadCurrent();
+    });
     panel.appendChild(go);
+
+    function syncGo() {
+      const ready = state.status === 'ready' && !!state.glb;
+      go.style.background = ready ? '#238636' : '#21262d';
+      go.style.color = ready ? '#fff' : '#484f58';
+      go.style.cursor = ready ? 'pointer' : 'not-allowed';
+      go.textContent = ready ? '⬇️ Скачать' : '⏳ Модель ещё не перехвачена';
+    }
 
     function paintFormats() {
       for (const f of FORMATS) {
@@ -567,9 +580,20 @@
       if (panel.style.display === 'block') { hidePanel(); return; }
       paintFormats();
       syncRatioControls();
+      syncGo();
       positionPanel();
       refreshStats();
     }
+
+    // Настройки могли измениться в попапе — подтягиваем их в панель
+    _panelSync = () => {
+      ratio.value = String(prefs.ratio);
+      ratioVal.textContent = prefs.ratio + '%';
+      paintFormats();
+      syncRatioControls();
+      syncGo();
+      if (panel.style.display === 'block') refreshStats();
+    };
 
     document.addEventListener('click', ev => {
       if (panel.style.display !== 'block') return;
@@ -636,13 +660,12 @@
         event.stopPropagation();
         return;
       }
-      if (event.target === gear) { togglePanel(); return; }
-      if (state.status !== 'ready') { setBtnBusy('⏳ Ещё не готово...', 1500); return; }
-      downloadCurrent();
+      togglePanel();
     }, true);
 
     window.addEventListener('__meshyDLReady', () => {
       updateBtn();
+      syncGo();
       if (panel.style.display === 'block') refreshStats();
     });
 
@@ -716,8 +739,21 @@
         status: state.status,
         glbSize: state.glb ? state.glb.byteLength : 0,
         modelName: state.modelName,
-        texNames: state.textures.map(t => t.name)
+        texNames: state.textures.map(t => t.name),
+        prefs: { format: prefs.format, ratio: prefs.ratio }
       }),
+      setPrefs: p => {
+        if (p && FORMATS.indexOf(p.format) >= 0) prefs.format = p.format;
+        if (p && Number.isFinite(p.ratio)) prefs.ratio = Math.min(100, Math.max(5, p.ratio));
+        savePrefs();
+        updateBtn();
+        if (_panelSync) _panelSync();
+        return { format: prefs.format, ratio: prefs.ratio };
+      },
+      analyze: () => {
+        if (!state.glb) return Promise.resolve({ error: 'Модель ещё не перехвачена' });
+        return getAnalysis().catch(e => ({ error: e.message }));
+      },
       download: () => { downloadCurrent(); return true; }
     };
   }
