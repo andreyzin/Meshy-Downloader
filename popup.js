@@ -54,7 +54,7 @@ async function refresh() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.url?.includes('meshy.ai')) {
-      setStatus('idle', 'Pas sur une page Meshy');
+      setStatus('idle', 'Это не страница Meshy');
       return;
     }
     currentTabId = tab.id;
@@ -64,16 +64,16 @@ async function refresh() {
     texNames = data.texNames || [];
 
     if (meta?.status === 'ready' && meta.glbSize > 0) {
-      setStatus('ready', 'Modèle intercepté ✅');
+      setStatus('ready', 'Модель перехвачена ✅');
       render(meta, texNames);
-      document.getElementById('hint').textContent = `${texNames.length} texture(s) interceptée(s).`;
+      document.getElementById('hint').textContent = `Перехвачено текстур: ${texNames.length}.`;
     } else {
-      setStatus('waiting', 'En attente du modèle...');
+      setStatus('waiting', 'Ожидание модели...');
       document.getElementById('hint').textContent =
-        '💡 Laisse la visionneuse 3D charger le modèle complètement.';
+        '💡 Дайте просмотрщику 3D полностью загрузить модель.';
     }
   } catch(e) {
-    setStatus('error', 'Erreur: ' + e.message.slice(0, 40));
+    setStatus('error', 'Ошибка: ' + e.message.slice(0, 40));
   }
 }
 
@@ -110,10 +110,10 @@ window.downloadAll = async function() {
     args: [meta.modelName || 'model', texNames]
   });
 
-  document.getElementById('btnDl').textContent = '✅ Téléchargé !';
+  document.getElementById('btnDl').textContent = '✅ Скачано!';
   setTimeout(() => {
     document.getElementById('btnDl').disabled = false;
-    document.getElementById('btnDl').textContent = '⬇️ Tout télécharger';
+    document.getElementById('btnDl').textContent = '⬇️ Скачать всё';
   }, 2000);
 };
 
