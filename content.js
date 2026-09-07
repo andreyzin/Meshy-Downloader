@@ -1,6 +1,6 @@
-// WORLD: MAIN — s'exécute dans le contexte de la page, accès direct à window
-// run_at: document_start — avant tout JS de la page
-// all_frames: true — le viewer 3D peut vivre dans une iframe
+// WORLD: MAIN — выполняется в контексте страницы, прямой доступ к window
+// run_at: document_start — раньше любого JS страницы
+// all_frames: true — просмотрщик 3D может жить в iframe
 (function() {
   'use strict';
 
@@ -11,11 +11,11 @@
   const IS_TOP = (() => { try { return window.top === window; } catch (e) { return false; } })();
   const state = { glb: null, textures: [], modelName: '', status: 'idle' };
 
-  const GLTF_MAGIC = 0x46546c67; // 'glTF' en little-endian
+  const GLTF_MAGIC = 0x46546c67; // 'glTF' в little-endian
   const TEX_RE = /\.(png|jpe?g|webp|ktx2|basis)(\?|$)/i;
   const MODEL_RE = /\.(glb|gltf)(\?|$)/i;
 
-  // ── Détection GLB ───────────────────────────────────────────────────────────
+  // ── Определение GLB ───────────────────────────────────────────────────────────
   function isGLB(buf) {
     if (!buf || !buf.byteLength || buf.byteLength < 12) return false;
     try { return new DataView(buf).getUint32(0, true) === GLTF_MAGIC; } catch (e) { return false; }
@@ -27,7 +27,7 @@
     return null;
   }
 
-  /** Cherche récursivement un ArrayBuffer GLB dans n'importe quelle structure. */
+  /** Рекурсивно ищет ArrayBuffer с GLB в структуре любого вида. */
   function scanForGLB(value, depth, seen) {
     if (value == null || depth > 4) return null;
     const buf = toArrayBuffer(value);
@@ -67,7 +67,7 @@
     return out;
   }
 
-  /** Point d'entrée unique pour tout message/buffer suspect. */
+  /** Единая точка входа для любого подозрительного сообщения или буфера. */
   function inspect(data, source) {
     if (data == null) return;
     const buf = scanForGLB(data, 0, null);
@@ -83,7 +83,7 @@
     }).catch(() => {});
   }
 
-  // ── Capture ─────────────────────────────────────────────────────────────────
+  // ── Захват ─────────────────────────────────────────────────────────────────
   function buffersAreEqual(a, b) {
     if (!a || !b || a.byteLength !== b.byteLength) return false;
     const u1 = new Uint8Array(a), u2 = new Uint8Array(b);
@@ -94,12 +94,12 @@
   function captureGLB(buf, source) {
     const newGlb = buf.slice(0);
     if (state.glb && buffersAreEqual(state.glb, newGlb)) return;
-    if (state.glb) { log('🔄 Nouveau modèle détecté, reset textures'); state.textures = []; }
+    if (state.glb) { log('🔄 Обнаружена новая модель, сброс текстур'); state.textures = []; }
 
     state.glb = newGlb;
     state.modelName = getModelName();
     state.status = 'ready';
-    log('✅ GLB intercepté via', source, (newGlb.byteLength / 1024 / 1024).toFixed(2), 'MB');
+    log('✅ GLB перехвачен через', source, (newGlb.byteLength / 1024 / 1024).toFixed(2), 'MB');
     publish();
   }
 
@@ -107,17 +107,17 @@
     if (!name || !buf || !buf.byteLength) return;
     if (state.textures.find(t => t.name === name)) return;
     state.textures.push({ name, buf: buf.slice(0) });
-    log('🖼️ Texture:', name, (buf.byteLength / 1024).toFixed(0), 'KB', '(' + source + ')');
+    log('🖼️ Текстура:', name, (buf.byteLength / 1024).toFixed(0), 'KB', '(' + source + ')');
     publish();
   }
 
-  /** Frame principale → IndexedDB. Iframe → relai postMessage vers le parent. */
+  /** Главный фрейм → IndexedDB. Iframe → ретрансляция через postMessage наверх. */
   function publish() {
     if (IS_TOP) {
       saveToIDB().then(() => {
         updateBtn();
         window.dispatchEvent(new CustomEvent('__meshyDLReady'));
-      }).catch(e => log('IDB error', e));
+      }).catch(e => log('Ошибка IndexedDB', e));
       return;
     }
     try {
@@ -130,7 +130,7 @@
         t.relayed = true;
         window.top.postMessage({ __meshyDL: 'tex', name: t.name, buf: t.buf.slice(0) }, '*');
       }
-    } catch (e) { dbg('relai impossible', e); }
+    } catch (e) { dbg('ретрансляция невозможна', e); }
   }
 
   if (IS_TOP) {
@@ -148,7 +148,7 @@
     });
   }
 
-  // ── Patch Worker / MessagePort ──────────────────────────────────────────────
+  // ── Патч Worker / MessagePort ──────────────────────────────────────────────
   const wrapped = new WeakMap();
 
   function patchMessageTarget(proto, label) {
@@ -194,19 +194,19 @@
   patchMessageTarget(window.MessagePort && window.MessagePort.prototype, 'MessagePort');
   patchMessageTarget(window.BroadcastChannel && window.BroadcastChannel.prototype, 'BroadcastChannel');
 
-  // Log de tous les workers créés (diagnostic : nom réel du worker de décryptage)
+  // Лог всех создаваемых воркеров (диагностика: реальное имя воркера расшифровки)
   if (window.Worker) {
     const _Worker = window.Worker;
     class LoggedWorker extends _Worker {
       constructor(url, opts) {
         super(url, opts);
-        log('👷 new Worker:', String(url), opts || '');
+        log('👷 новый Worker:', String(url), opts || '');
       }
     }
     window.Worker = LoggedWorker;
   }
 
-  // ── Patch fetch ─────────────────────────────────────────────────────────────
+  // ── Патч fetch ─────────────────────────────────────────────────────────────
   const _fetch = window.fetch;
   window.fetch = async function(...args) {
     const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
@@ -224,11 +224,11 @@
     resp.arrayBuffer().then(buf => {
       if (isTex) return captureTexture(url.split('/').pop().split('?')[0], buf, source);
       if (isGLB(buf)) captureGLB(buf, source + ':' + url.split('/').pop().split('?')[0]);
-      else dbg('modèle non-GLB (chiffré ?)', url.split('?')[0], buf.byteLength, 'octets');
+      else dbg('ответ не GLB (зашифрован?)', url.split('?')[0], buf.byteLength, 'байт');
     }).catch(() => {});
   }
 
-  // ── Patch XMLHttpRequest ────────────────────────────────────────────────────
+  // ── Патч XMLHttpRequest ────────────────────────────────────────────────────
   const _open = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url) {
     this.__meshyUrl = String(url || '');
@@ -245,19 +245,19 @@
       if (!buf) return;
       if (isGLB(buf)) captureGLB(buf, 'xhr:' + url.split('/').pop().split('?')[0]);
       else if (TEX_RE.test(url)) captureTexture(url.split('/').pop().split('?')[0], buf, 'xhr');
-      else dbg('xhr', url.split('?')[0], buf.byteLength, 'octets');
+      else dbg('xhr', url.split('?')[0], buf.byteLength, 'байт');
     });
     return _send.apply(this, arguments);
   };
 
-  // ── Patch URL.createObjectURL (GLB passé sous forme de Blob) ────────────────
+  // ── Патч URL.createObjectURL (GLB, переданный в виде Blob) ────────────────
   const _createObjectURL = URL.createObjectURL;
   URL.createObjectURL = function(obj) {
     if (obj instanceof Blob && obj.size > 1024) peekBlob(obj, 'createObjectURL');
     return _createObjectURL.call(this, obj);
   };
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
+  // ── Вспомогательное ────────────────────────────────────────────────────────────────
   function getModelName() {
     const h1 = document.querySelector('h1');
     if (h1 && h1.textContent) {
@@ -313,7 +313,7 @@
     } catch (e) {}
   }
 
-  // ── Bouton flottant ────────────────────────────────────────────────────────
+  // ── Плавающая кнопка ────────────────────────────────────────────────────────
   function injectBtn() {
     if (document.getElementById('__meshyDLBtn')) return;
     const btn = document.createElement('div');
@@ -387,7 +387,7 @@
     btn.onclick = event => {
       if (dragStart) return;
       if (state.status !== 'ready') {
-        btn.textContent = '⏳ Pas encore prêt...';
+        btn.textContent = '⏳ Ещё не готово...';
         return;
       }
       downloadAll();
@@ -417,12 +417,12 @@
     const btn = document.getElementById('__meshyDLBtn');
     if (!btn) return;
     const texInfo = state.textures.length > 0 ? ` + ${state.textures.length} tex` : '';
-    btn.textContent = `⬇️ GLB${texInfo} — Télécharger`;
+    btn.textContent = `⬇️ GLB${texInfo} — Скачать`;
     btn.style.background = '#1f6feb';
     btn.style.border = '2px solid #58a6ff';
   }
 
-  // Bouton uniquement dans la frame principale
+  // Кнопка только в главном фрейме
   if (IS_TOP) {
     if (document.body) injectBtn();
     else new MutationObserver((_, obs) => {
@@ -430,5 +430,5 @@
     }).observe(document.documentElement, { childList: true });
   }
 
-  log('✅ Extension chargée (MAIN world, document_start,', IS_TOP ? 'top frame' : 'iframe ' + location.href.slice(0, 60), ')');
+  log('✅ Расширение загружено (MAIN world, document_start,', IS_TOP ? 'главный фрейм' : 'iframe ' + location.href.slice(0, 60), ')');
 })();
